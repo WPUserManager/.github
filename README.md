@@ -4,7 +4,7 @@ This repository contains default files used to standardize GitHub issues and pul
 
 ## How It Works
 
-The `.github` directory in this project will be used by any repository in `premmerce-wp` that does _not_ have a `.github` directory in its own project root.
+The `.github` directory in this project will be used by any repository in `WPUserManager` that does _not_ have a `.github` directory in its own project root.
 
 For more information, see GitHub documentation for [Creating a repository for default files](https://docs.github.com/en/github/building-a-strong-community/creating-a-default-community-health-file#creating-a-repository-for-default-files).
 
