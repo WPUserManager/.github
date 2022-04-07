@@ -1,0 +1,16 @@
+Resolves #
+
+## Description
+
+## Testing Instructions
+
+1.
+
+## Pre-review Checklist
+
+- [ ] [Issue and pull request titles](#) are properly formatted.
+- [ ] [Acceptance criteria](#) have been satisfied and marked in the related issue.
+- [ ] Unit tests are included (if applicable).
+- [ ] Self-review of code changes has been completed.
+- [ ] Self-review of UX changes has been completed.
+- [ ] Review has been requested from @polevaultweb.
