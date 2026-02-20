@@ -7,9 +7,9 @@
 # Usage in a plugin repo:
 #   jobs:
 #     deploy:
-#       uses: WPUserManager/.github/.github/workflows/deploy.yml@main
+#       uses: WPUserManager/.github/.github/workflows/deploy.yml@master
 #       with:
-#         plugin-slug: wpum-custom-fields
+#         plugin-slug: wp-user-manager
 #       secrets: inherit
 
 name: Deploy Plugin
@@ -20,6 +20,10 @@ on:
       plugin-slug:
         required: true
         type: string
+      node-version:
+        required: false
+        type: string
+        default: "18"
 
 jobs:
   deploy:
@@ -34,7 +38,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: ${{ inputs.node-version }}
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -74,7 +78,7 @@ jobs:
 
       - name: Build plugin
         run: |
-          if command -v grunt &> /dev/null || npx grunt --version &> /dev/null 2>&1; then
+          if npx grunt --version &> /dev/null 2>&1; then
             npx grunt build
           else
             echo "No Grunt build — shipping source directly"
@@ -103,6 +107,14 @@ jobs:
             echo "build_dir=release/${VERSION}" >> $GITHUB_OUTPUT
             echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
           fi
+
+      - name: Verify build artifacts
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SLUG=${{ inputs.plugin-slug }}
+          test -d "release/${VERSION}" || { echo "::error::Build directory release/${VERSION} not found — does package.json version match the tag?"; exit 1; }
+          test -f "release/${SLUG}.${VERSION}.zip" || { echo "::error::Release zip not found"; exit 1; }
+          echo "Build OK — release/${VERSION}/ and zip exist"
 
       - name: Deploy to WordPress.org
         if: steps.config.outputs.wordpress_org == 'true'
