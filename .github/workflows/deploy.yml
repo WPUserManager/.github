@@ -105,7 +105,14 @@ jobs:
           # Check if grunt build created a release dir
           if [ -d "release/${VERSION}" ]; then
             echo "build_dir=release/${VERSION}" >> $GITHUB_OUTPUT
-            echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
+            # Zip name varies: core uses slug.version.zip, addons use slug.zip
+            if [ -f "release/${SLUG}.${VERSION}.zip" ]; then
+              echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
+            elif [ -f "release/${SLUG}.zip" ]; then
+              echo "zip=release/${SLUG}.zip" >> $GITHUB_OUTPUT
+            else
+              echo "::error::No release zip found"; ls release/; exit 1
+            fi
           else
             # Create a clean build directory for addons without grunt
             mkdir -p "release/${VERSION}"
@@ -122,11 +129,9 @@ jobs:
 
       - name: Verify build artifacts
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          SLUG=${{ inputs.plugin-slug }}
-          test -d "release/${VERSION}" || { echo "::error::Build directory release/${VERSION} not found — does package.json version match the tag?"; exit 1; }
-          test -f "release/${SLUG}.${VERSION}.zip" || { echo "::error::Release zip not found"; exit 1; }
-          echo "Build OK — release/${VERSION}/ and zip exist"
+          test -d "${{ steps.package.outputs.build_dir }}" || { echo "::error::Build directory not found — does package.json version match the tag?"; exit 1; }
+          test -f "${{ steps.package.outputs.zip }}" || { echo "::error::Release zip not found"; exit 1; }
+          echo "Build OK — ${{ steps.package.outputs.zip }}"
 
       - name: Deploy to WordPress.org
         if: steps.config.outputs.wordpress_org == 'true'
