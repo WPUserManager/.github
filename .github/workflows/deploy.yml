@@ -135,7 +135,7 @@ jobs:
       - name: Update EDD download
         if: steps.config.outputs.edd == 'true'
         env:
-          EDD_RELEASE_TOKEN: ${{ secrets.EDD_RELEASE_TOKEN }}
+          WPUM_RELEASE_API_TOKEN: ${{ secrets.WPUM_RELEASE_API_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SLUG=${{ inputs.plugin-slug }}
@@ -144,7 +144,7 @@ jobs:
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/${SLUG}.${VERSION}.zip"
 
           curl -sf -X POST https://wpusermanager.com/wp-json/wpum/v1/release \
-            -H "Authorization: Bearer ${EDD_RELEASE_TOKEN}" \
+            -H "Authorization: Bearer ${WPUM_RELEASE_API_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{
               \"slug\": \"${SLUG}\",
