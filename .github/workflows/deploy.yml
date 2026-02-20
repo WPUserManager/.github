@@ -1,0 +1,143 @@
+# Reusable deploy workflow for WPUM plugins
+# Lives in: WPUserManager/.github/.github/workflows/deploy.yml
+#
+# Called by each plugin repo's release.yml via workflow_call.
+# Triggered when a tag matching v*.*.* is pushed.
+#
+# Usage in a plugin repo:
+#   jobs:
+#     deploy:
+#       uses: WPUserManager/.github/.github/workflows/deploy.yml@main
+#       with:
+#         plugin-slug: wpum-custom-fields
+#       secrets: inherit
+
+name: Deploy Plugin
+
+on:
+  workflow_call:
+    inputs:
+      plugin-slug:
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          tools: composer:v2
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Read release config
+        id: config
+        run: |
+          if [ -f release.json ]; then
+            echo "type=$(jq -r '.type' release.json)" >> $GITHUB_OUTPUT
+            echo "wordpress_org=$(jq -r '.channels.wordpress_org' release.json)" >> $GITHUB_OUTPUT
+            echo "edd=$(jq -r '.channels.edd' release.json)" >> $GITHUB_OUTPUT
+            echo "edd_download_id=$(jq -r '.edd_download_id // empty' release.json)" >> $GITHUB_OUTPUT
+          else
+            echo "type=addon" >> $GITHUB_OUTPUT
+            echo "wordpress_org=false" >> $GITHUB_OUTPUT
+            echo "edd=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Node dependencies
+        run: |
+          if [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          fi
+
+      - name: Install Composer dependencies
+        if: hashFiles('composer.json') != ''
+        run: composer install --no-dev --optimize-autoloader --ignore-platform-reqs
+
+      - name: Build plugin
+        run: |
+          if command -v grunt &> /dev/null || npx grunt --version &> /dev/null 2>&1; then
+            npx grunt build
+          else
+            echo "No Grunt build — shipping source directly"
+          fi
+
+      - name: Package plugin
+        id: package
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SLUG=${{ inputs.plugin-slug }}
+
+          # Check if grunt build created a release dir
+          if [ -d "release/${VERSION}" ]; then
+            echo "build_dir=release/${VERSION}" >> $GITHUB_OUTPUT
+            echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
+          else
+            # Create a clean build directory for addons without grunt
+            mkdir -p "release/${VERSION}"
+            rsync -a --exclude='.git' --exclude='node_modules' --exclude='tests' \
+              --exclude='.github' --exclude='vendor' --exclude='.gitignore' \
+              --exclude='phpcs.xml.dist' --exclude='phpstan.neon.dist' \
+              --exclude='composer.lock' --exclude='package-lock.json' \
+              --exclude='yarn.lock' --exclude='release' \
+              . "release/${VERSION}/"
+            cd release && zip -r "${SLUG}.${VERSION}.zip" "${VERSION}/" -x '*/.*' && cd ..
+            echo "build_dir=release/${VERSION}" >> $GITHUB_OUTPUT
+            echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to WordPress.org
+        if: steps.config.outputs.wordpress_org == 'true'
+        uses: 10up/action-wordpress-plugin-deploy@stable
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: ${{ inputs.plugin-slug }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_DIR: ${{ steps.package.outputs.build_dir }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}
+          generate_release_notes: true
+
+      - name: Update EDD download
+        if: steps.config.outputs.edd == 'true'
+        env:
+          EDD_RELEASE_TOKEN: ${{ secrets.EDD_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SLUG=${{ inputs.plugin-slug }}
+          VERSION=${{ steps.version.outputs.version }}
+          DOWNLOAD_ID=${{ steps.config.outputs.edd_download_id }}
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/${SLUG}.${VERSION}.zip"
+
+          curl -sf -X POST https://wpusermanager.com/wp-json/wpum/v1/release \
+            -H "Authorization: Bearer ${EDD_RELEASE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"slug\": \"${SLUG}\",
+              \"version\": \"${VERSION}\",
+              \"download_id\": ${DOWNLOAD_ID},
+              \"zip_url\": \"${RELEASE_URL}\",
+              \"github_token\": \"${GH_TOKEN}\"
+            }"
