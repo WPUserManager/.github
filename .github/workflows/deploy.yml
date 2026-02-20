@@ -76,6 +76,18 @@ jobs:
         if: hashFiles('composer.json') != ''
         run: composer install --no-dev --optimize-autoloader --ignore-platform-reqs
 
+      - name: Generate POT translation file
+        run: |
+          if npx grunt --version &> /dev/null 2>&1; then
+            npx grunt do_pot || echo "::warning::do_pot failed — .pot may be stale"
+          fi
+
+      - name: Sync version numbers from package.json
+        run: |
+          if npx grunt --version &> /dev/null 2>&1; then
+            npx grunt pre_vcs || echo "::warning::pre_vcs failed — versions may be stale"
+          fi
+
       - name: Build plugin
         run: |
           if npx grunt --version &> /dev/null 2>&1; then
