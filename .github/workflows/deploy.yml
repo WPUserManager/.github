@@ -159,7 +159,6 @@ jobs:
           SLUG=${{ inputs.plugin-slug }}
           TAG=${GITHUB_REF_NAME}
           TYPE=${{ steps.config.outputs.type }}
-          REPO="${{ github.repository }}"
 
           # Derive display name: "wpum-custom-fields" -> "Custom Fields"
           if [ "$SLUG" = "wp-user-manager" ]; then
@@ -170,42 +169,29 @@ jobs:
             ADDON_URL="https://wpusermanager.com/addons/${SLUG}/"
           fi
 
-          # --- Source 1: merged PR titles since previous tag ---
-          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
-          PR_CHANGES=""
-          if [ -n "$PREV_TAG" ]; then
-            PR_CHANGES=$(git log "${PREV_TAG}..${TAG}" --merges --first-parent --pretty=format:"%s" \
-              | sed 's/Merge pull request #[0-9]* from [^ ]*//' \
-              | sed 's/^ *//' \
-              | grep -v '^$' \
-              | head -8)
-          fi
-
-          # --- Source 2: "Ready for Release" issues from the project board ---
-          # Project #2 = "WP User Manager", Status option "Ready for Release" = 852c7c68
-          REPO_URL="https://github.com/${REPO}"
-          PROJECT_ISSUES=$(gh project item-list 2 --owner WPUserManager --format json --limit 200 2>/dev/null \
-            | jq -r --arg repo "$REPO_URL" --arg status "🚀 Ready for Release" \
-              '.items[] | select(.status == $status and .repository == $repo) | "• \(.title) (#\(.content.number))"' \
-            2>/dev/null || echo "")
-
-          # Build combined bullet list
+          # Extract changelog for this version from readme.txt
+          # The changelog was already assembled during release prep (from PRs + project board)
           BULLETS=""
-          if [ -n "$PR_CHANGES" ]; then
-            while IFS= read -r line; do
-              [ -n "$line" ] && BULLETS="${BULLETS}• ${line}
-          "
-            done <<< "$PR_CHANGES"
+          if [ -f readme.txt ]; then
+            # Extract lines between "= X.X.X ..." and the next "= " heading
+            BULLETS=$(awk -v ver="= ${VERSION}" '
+              $0 ~ ver { found=1; next }
+              found && /^= / { exit }
+              found && /^[-*] / { print $0 }
+            ' readme.txt | sed 's/^[-*] /• /' | head -8)
           fi
 
-          # Append project issues (skip duplicates already in PR list)
-          if [ -n "$PROJECT_ISSUES" ]; then
-            while IFS= read -r line; do
-              if [ -n "$line" ] && ! echo "$BULLETS" | grep -qF "$line"; then
-                BULLETS="${BULLETS}${line}
-          "
-              fi
-            done <<< "$PROJECT_ISSUES"
+          # Fallback: if readme.txt didn't have a changelog, try git log
+          if [ -z "$BULLETS" ]; then
+            PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+            if [ -n "$PREV_TAG" ]; then
+              BULLETS=$(git log "${PREV_TAG}..${TAG}" --merges --first-parent --pretty=format:"%s" \
+                | sed 's/Merge pull request #[0-9]* from [^ ]*//' \
+                | sed 's/^ *//' \
+                | grep -v '^$' \
+                | sed 's/^/• /' \
+                | head -8)
+            fi
           fi
 
           # Get existing auto-generated release body
@@ -220,7 +206,7 @@ jobs:
 
           # Write tweet block to a temp file to avoid quoting issues
           cat > /tmp/tweet_block.md << TWEET_EOF
-          📋 **Draft Tweet** *(copy to X — add/remove emoji bullets as needed)*
+          📋 **Draft Tweet** *(copy to X — add emoji bullets as needed)*
 
           \`\`\`
           ${HEADER}
@@ -228,6 +214,7 @@ jobs:
           📝 ${DISPLAY_NAME} v${VERSION}
 
           ${BULLETS}
+
           ${ADDON_URL}
           \`\`\`
 
