@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -148,6 +150,77 @@ jobs:
         with:
           files: ${{ steps.package.outputs.zip }}
           generate_release_notes: true
+
+      - name: Add draft tweet to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SLUG=${{ inputs.plugin-slug }}
+          TAG=${GITHUB_REF_NAME}
+          TYPE=${{ steps.config.outputs.type }}
+
+          # Derive display name: "wpum-custom-fields" -> "Custom Fields"
+          if [ "$SLUG" = "wp-user-manager" ]; then
+            DISPLAY_NAME="WP User Manager"
+            ADDON_URL="https://wpusermanager.com/"
+          else
+            DISPLAY_NAME=$(echo "$SLUG" | sed 's/^wpum-//' | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+            ADDON_URL="https://wpusermanager.com/addons/${SLUG}/"
+          fi
+
+          # Collect merged PR titles since previous tag
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+          CHANGES=""
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log "${PREV_TAG}..${TAG}" --merges --first-parent --pretty=format:"%s" \
+              | sed 's/Merge pull request #[0-9]* from [^ ]*//' \
+              | sed 's/^ *//' \
+              | grep -v '^$' \
+              | head -8)
+          fi
+
+          # Build bullet list
+          BULLETS=""
+          if [ -n "$CHANGES" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && BULLETS="${BULLETS}
+          • ${line}"
+            done <<< "$CHANGES"
+          fi
+
+          # Get existing auto-generated release body
+          EXISTING_BODY=$(gh release view "$TAG" --json body -q '.body' 2>/dev/null || echo "")
+
+          # Compose the tweet block
+          if [ "$TYPE" = "addon" ]; then
+            HEADER="WP User Manager addon update 🚀"
+          else
+            HEADER="WP User Manager ${VERSION} Released 🚀"
+          fi
+
+          # Write tweet block to a temp file to avoid quoting issues
+          cat > /tmp/tweet_block.md << TWEET_EOF
+          📋 **Draft Tweet** *(copy to X — add/remove emoji bullets as needed)*
+
+          \`\`\`
+          ${HEADER}
+
+          📝 ${DISPLAY_NAME} v${VERSION}
+          ${BULLETS}
+
+          ${ADDON_URL}
+          \`\`\`
+
+          ---
+
+          TWEET_EOF
+
+          # Combine tweet block + existing release notes
+          printf '%s\n%s' "$(cat /tmp/tweet_block.md)" "$EXISTING_BODY" > /tmp/release_body.md
+
+          # Update the release
+          gh release edit "$TAG" --notes-file /tmp/release_body.md
 
       - name: Update EDD download
         if: steps.config.outputs.edd == 'true'
