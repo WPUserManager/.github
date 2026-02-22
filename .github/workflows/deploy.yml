@@ -159,6 +159,7 @@ jobs:
           SLUG=${{ inputs.plugin-slug }}
           TAG=${GITHUB_REF_NAME}
           TYPE=${{ steps.config.outputs.type }}
+          REPO="${{ github.repository }}"
 
           # Derive display name: "wpum-custom-fields" -> "Custom Fields"
           if [ "$SLUG" = "wp-user-manager" ]; then
@@ -169,24 +170,42 @@ jobs:
             ADDON_URL="https://wpusermanager.com/addons/${SLUG}/"
           fi
 
-          # Collect merged PR titles since previous tag
+          # --- Source 1: merged PR titles since previous tag ---
           PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
-          CHANGES=""
+          PR_CHANGES=""
           if [ -n "$PREV_TAG" ]; then
-            CHANGES=$(git log "${PREV_TAG}..${TAG}" --merges --first-parent --pretty=format:"%s" \
+            PR_CHANGES=$(git log "${PREV_TAG}..${TAG}" --merges --first-parent --pretty=format:"%s" \
               | sed 's/Merge pull request #[0-9]* from [^ ]*//' \
               | sed 's/^ *//' \
               | grep -v '^$' \
               | head -8)
           fi
 
-          # Build bullet list
+          # --- Source 2: "Ready for Release" issues from the project board ---
+          # Project #2 = "WP User Manager", Status option "Ready for Release" = 852c7c68
+          REPO_URL="https://github.com/${REPO}"
+          PROJECT_ISSUES=$(gh project item-list 2 --owner WPUserManager --format json --limit 200 2>/dev/null \
+            | jq -r --arg repo "$REPO_URL" --arg status "🚀 Ready for Release" \
+              '.items[] | select(.status == $status and .repository == $repo) | "• \(.title) (#\(.content.number))"' \
+            2>/dev/null || echo "")
+
+          # Build combined bullet list
           BULLETS=""
-          if [ -n "$CHANGES" ]; then
+          if [ -n "$PR_CHANGES" ]; then
             while IFS= read -r line; do
-              [ -n "$line" ] && BULLETS="${BULLETS}
-          • ${line}"
-            done <<< "$CHANGES"
+              [ -n "$line" ] && BULLETS="${BULLETS}• ${line}
+          "
+            done <<< "$PR_CHANGES"
+          fi
+
+          # Append project issues (skip duplicates already in PR list)
+          if [ -n "$PROJECT_ISSUES" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ] && ! echo "$BULLETS" | grep -qF "$line"; then
+                BULLETS="${BULLETS}${line}
+          "
+              fi
+            done <<< "$PROJECT_ISSUES"
           fi
 
           # Get existing auto-generated release body
@@ -207,8 +226,8 @@ jobs:
           ${HEADER}
 
           📝 ${DISPLAY_NAME} v${VERSION}
-          ${BULLETS}
 
+          ${BULLETS}
           ${ADDON_URL}
           \`\`\`
 
