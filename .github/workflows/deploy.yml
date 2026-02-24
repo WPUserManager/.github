@@ -69,7 +69,12 @@ jobs:
       - name: Install Node dependencies
         run: |
           if [ -f yarn.lock ]; then
-            yarn install --frozen-lockfile
+            # Use --ignore-scripts to skip native builds (e.g. node-sass on Node 14)
+            # then download prebuilt binaries separately
+            yarn install --ignore-engines --ignore-scripts
+            if [ -d node_modules/node-sass ]; then
+              node node_modules/node-sass/scripts/install.js || true
+            fi
           elif [ -f package-lock.json ]; then
             npm ci
           fi
