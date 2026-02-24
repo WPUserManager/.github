@@ -125,9 +125,16 @@ jobs:
             mkdir -p "release/${VERSION}"
             rsync -a --exclude='.git' --exclude='node_modules' --exclude='tests' \
               --exclude='.github' --exclude='vendor' --exclude='.gitignore' \
+              --exclude='Gruntfile.js' --exclude='package.json' \
+              --exclude='package-lock.json' --exclude='yarn.lock' \
+              --exclude='composer.json' --exclude='composer.lock' \
+              --exclude='.yarnrc' --exclude='release.json' \
               --exclude='phpcs.xml.dist' --exclude='phpstan.neon.dist' \
-              --exclude='composer.lock' --exclude='package-lock.json' \
-              --exclude='yarn.lock' --exclude='release' \
+              --exclude='phpstan-baseline.neon' --exclude='phpstan-stubs.php' \
+              --exclude='playwright.config.ts' --exclude='tsconfig.json' \
+              --exclude='.wp-env.json' --exclude='.wp-env.override.json' \
+              --exclude='test-results' --exclude='release' \
+              --exclude='README.md' --exclude='distributewp.json' \
               . "release/${VERSION}/"
             cd release && zip -r "${SLUG}.${VERSION}.zip" "${VERSION}/" -x '*/.*' && cd ..
             echo "build_dir=release/${VERSION}" >> $GITHUB_OUTPUT
