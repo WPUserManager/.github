@@ -19,7 +19,7 @@ Steps for a reviewer to verify this works:
 ## Test Coverage
 
 - [ ] Unit tests added/updated in `tests/wpunit/`
-- [ ] Tests reproduce the bug (for bug fixes) — test fails before fix, passes after
+- [ ] E2E test reproduces the bug (for bug fixes) — test fails before fix, passes after
 - [ ] Happy path covered
 - [ ] Edge cases covered
 - [ ] All existing tests still pass (`vendor/bin/codecept run wpunit` or `vendor/bin/phpunit`)
