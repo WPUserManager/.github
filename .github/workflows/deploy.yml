@@ -79,6 +79,14 @@ jobs:
             npm ci
           fi
 
+      - name: Set package.json version from tag
+        if: hashFiles('package.json') != ''
+        run: |
+          # The git tag is the source of truth. Grunt stamps files and names the
+          # build directory from package.json, so a stale version there would
+          # ship the wrong version header.
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
       - name: Install Composer dependencies
         if: hashFiles('composer.json') != ''
         run: composer install --no-dev --optimize-autoloader --ignore-platform-reqs
@@ -91,14 +99,16 @@ jobs:
 
       - name: Sync version numbers from package.json
         run: |
-          if npx grunt --version &> /dev/null 2>&1; then
-            npx grunt pre_vcs || echo "::warning::pre_vcs failed — versions may be stale"
+          if npx grunt --version &> /dev/null 2>&1 && grep -qE "registerTask\(\s*'pre_vcs'" Gruntfile.js; then
+            npx grunt pre_vcs
           fi
 
       - name: Build plugin
+        id: build
         run: |
           if npx grunt --version &> /dev/null 2>&1; then
             npx grunt build
+            echo "grunt=true" >> $GITHUB_OUTPUT
           else
             echo "No Grunt build — shipping source directly"
           fi
@@ -120,6 +130,10 @@ jobs:
             else
               echo "::error::No release zip found"; ls release/; exit 1
             fi
+          elif [ "${{ steps.build.outputs.grunt }}" = "true" ]; then
+            # Grunt ran but didn't produce release/<tag version>. Never fall back
+            # to copying the repo, that ships dev files and a stale version.
+            echo "::error::grunt build did not create release/${VERSION}"; ls release/ || true; exit 1
           else
             # Create a clean build directory for addons without grunt
             mkdir -p "release/${VERSION}"
@@ -146,6 +160,35 @@ jobs:
           test -d "${{ steps.package.outputs.build_dir }}" || { echo "::error::Build directory not found — does package.json version match the tag?"; exit 1; }
           test -f "${{ steps.package.outputs.zip }}" || { echo "::error::Release zip not found"; exit 1; }
           echo "Build OK — ${{ steps.package.outputs.zip }}"
+
+      - name: Verify versions match tag
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BUILD_DIR=${{ steps.package.outputs.build_dir }}
+          FAILED=0
+
+          # Main plugin file: the root PHP file with a Plugin Name header
+          MAIN_FILE=$(grep -l "Plugin Name:" "$BUILD_DIR"/*.php 2>/dev/null | head -1)
+          if [ -z "$MAIN_FILE" ]; then
+            echo "::error::No main plugin file found in $BUILD_DIR"; exit 1
+          fi
+
+          HEADER_VERSION=$(grep -m1 -E '^[[:space:]]*\*?[[:space:]]*Version:' "$MAIN_FILE" | sed -E 's/.*Version:[[:space:]]*//' | tr -d '[:space:]')
+          if [ "$HEADER_VERSION" != "$VERSION" ]; then
+            echo "::error file=$(basename "$MAIN_FILE")::Plugin header Version is '$HEADER_VERSION', expected '$VERSION'"
+            FAILED=1
+          fi
+
+          if [ -f "$BUILD_DIR/readme.txt" ] && grep -qi '^Stable tag:' "$BUILD_DIR/readme.txt"; then
+            STABLE_TAG=$(grep -m1 -i '^Stable tag:' "$BUILD_DIR/readme.txt" | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]')
+            if [ "$STABLE_TAG" != "$VERSION" ]; then
+              echo "::error file=readme.txt::Stable tag is '$STABLE_TAG', expected '$VERSION'"
+              FAILED=1
+            fi
+          fi
+
+          [ "$FAILED" = "0" ] && echo "Versions match tag $VERSION"
+          exit $FAILED
 
       - name: Deploy to WordPress.org
         if: steps.config.outputs.wordpress_org == 'true'
