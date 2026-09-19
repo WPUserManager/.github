@@ -221,7 +221,20 @@ jobs:
             ADDON_URL="https://wpusermanager.com/"
           else
             DISPLAY_NAME=$(echo "$SLUG" | sed 's/^wpum-//' | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
-            ADDON_URL="https://wpusermanager.com/addons/${SLUG}/"
+            # Addon pages drop the wpum- prefix: wpum-security -> /addons/security/.
+            ADDON_URL="https://wpusermanager.com/addons/${SLUG#wpum-}/"
+            # Free addons on wordpress.org have no page on wpusermanager.com.
+            if [ "${{ steps.config.outputs.wordpress_org }}" = "true" ]; then
+              ADDON_URL="https://wordpress.org/plugins/${SLUG}/"
+            fi
+          fi
+
+          # release.json can override the link, e.g. "addon_url": "https://wpusermanager.com/addons/stripe-pro/"
+          if [ -f release.json ]; then
+            URL_OVERRIDE=$(jq -r '.addon_url // empty' release.json)
+            if [ -n "$URL_OVERRIDE" ]; then
+              ADDON_URL="$URL_OVERRIDE"
+            fi
           fi
 
           # Extract changelog for this version from readme.txt
