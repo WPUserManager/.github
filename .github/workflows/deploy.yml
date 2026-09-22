@@ -1,4 +1,4 @@
-# Reusable deploy workflow for WPUM plugins
+# Reusable deploy workflow for WPUM and other Pole Vault Web plugins
 # Lives in: WPUserManager/.github/.github/workflows/deploy.yml
 #
 # Called by each plugin repo's release.yml via workflow_call.
@@ -11,6 +11,27 @@
 #       with:
 #         plugin-slug: wp-user-manager
 #       secrets: inherit
+#
+# release.json (in plugin-dir) drives the rest. Everything below is optional,
+# and a repo that sets none of it gets the original Grunt behaviour:
+#
+#   "build": "distignore"     Build without Grunt: `npm run build` if package.json
+#                             has a build script, `composer install --no-dev`,
+#                             `wp i18n make-pot` if languages/ exists, then copy
+#                             everything not listed in .distignore.
+#   "name", "url"             Product name and link for the draft tweet, for
+#                             plugins that aren't WP User Manager.
+#   "channels.sellwire"       Upload the zip to Sellwire as a new version of
+#   "sellwire_file_id"        this numeric file ID. Needs the SELLWIRE_API_KEY
+#   "sellwire_notify"         secret. notify (default false) emails customers.
+#   "version_checks"          [{"file": "x.php", "pattern": "perl regex, one
+#                             capture group"}]: extra places the version must
+#                             match the tag, e.g. a constant or class property.
+#
+# plugin-dir is for repos whose plugin lives in a subdirectory. It only works
+# with "build": "distignore". dry-run builds and verifies, uploads the zip as a
+# workflow artifact, takes the version from the plugin header instead of a tag,
+# and deploys nothing.
 
 name: Deploy Plugin
 
@@ -24,6 +45,14 @@ on:
         required: false
         type: string
         default: "18"
+      plugin-dir:
+        required: false
+        type: string
+        default: "."
+      dry-run:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   deploy:
@@ -31,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      PLUGIN_DIR: ${{ inputs.plugin-dir }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,25 +79,55 @@ jobs:
           php-version: "8.1"
           tools: composer:v2
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
       - name: Read release config
         id: config
+        working-directory: ${{ inputs.plugin-dir }}
         run: |
           if [ -f release.json ]; then
             echo "type=$(jq -r '.type' release.json)" >> $GITHUB_OUTPUT
             echo "wordpress_org=$(jq -r '.channels.wordpress_org' release.json)" >> $GITHUB_OUTPUT
             echo "edd=$(jq -r '.channels.edd' release.json)" >> $GITHUB_OUTPUT
             echo "edd_download_id=$(jq -r '.edd_download_id // empty' release.json)" >> $GITHUB_OUTPUT
+            echo "sellwire=$(jq -r '.channels.sellwire // false' release.json)" >> $GITHUB_OUTPUT
+            echo "sellwire_file_id=$(jq -r '.sellwire_file_id // empty' release.json)" >> $GITHUB_OUTPUT
+            echo "sellwire_notify=$(jq -r 'if .sellwire_notify == true then 1 else 0 end' release.json)" >> $GITHUB_OUTPUT
+            echo "build=$(jq -r '.build // "grunt"' release.json)" >> $GITHUB_OUTPUT
+            echo "main_file=$(jq -r '.main_file // empty' release.json)" >> $GITHUB_OUTPUT
           else
             echo "type=addon" >> $GITHUB_OUTPUT
             echo "wordpress_org=false" >> $GITHUB_OUTPUT
             echo "edd=true" >> $GITHUB_OUTPUT
+            echo "sellwire=false" >> $GITHUB_OUTPUT
+            echo "build=grunt" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check inputs
+        run: |
+          BUILD=${{ steps.config.outputs.build }}
+          case "$BUILD" in grunt|distignore) ;; *) echo "::error::release.json build must be grunt or distignore, got '$BUILD'"; exit 1 ;; esac
+          if [ "$PLUGIN_DIR" != "." ] && [ "$BUILD" != "distignore" ]; then
+            echo "::error::plugin-dir needs \"build\": \"distignore\" in release.json"; exit 1
+          fi
+
+      - name: Extract version
+        id: version
+        working-directory: ${{ inputs.plugin-dir }}
+        run: |
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            # No tag on a dry run: take the version the plugin header declares.
+            MAIN="${{ steps.config.outputs.main_file }}"
+            [ -n "$MAIN" ] || MAIN=$(grep -l "Plugin Name:" *.php | head -1)
+            V=$(grep -m1 -E '^[[:space:]]*\*?[[:space:]]*Version:' "$MAIN" | sed -E 's/.*Version:[[:space:]]*//' | tr -d '[:space:]')
+            echo "Dry run — using header version $V"
+            echo "version=$V" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      # --- Grunt build (default) ------------------------------------------
+
       - name: Install Node dependencies
+        if: steps.config.outputs.build == 'grunt'
         run: |
           if [ -f yarn.lock ]; then
             # Use --ignore-scripts to skip native builds (e.g. node-sass on Node 14)
@@ -80,7 +141,7 @@ jobs:
           fi
 
       - name: Set package.json version from tag
-        if: hashFiles('package.json') != ''
+        if: steps.config.outputs.build == 'grunt' && hashFiles('package.json') != ''
         run: |
           # The git tag is the source of truth. Grunt stamps files and names the
           # build directory from package.json, so a stale version there would
@@ -88,16 +149,18 @@ jobs:
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Install Composer dependencies
-        if: hashFiles('composer.json') != ''
+        if: steps.config.outputs.build == 'grunt' && hashFiles('composer.json') != ''
         run: composer install --no-dev --optimize-autoloader --ignore-platform-reqs
 
       - name: Generate POT translation file
+        if: steps.config.outputs.build == 'grunt'
         run: |
           if npx grunt --version &> /dev/null 2>&1; then
             npx grunt do_pot || echo "::warning::do_pot failed — .pot may be stale"
           fi
 
       - name: Sync version numbers from package.json
+        if: steps.config.outputs.build == 'grunt'
         run: |
           if npx grunt --version &> /dev/null 2>&1 && grep -qE "registerTask\(\s*'pre_vcs'" Gruntfile.js; then
             npx grunt pre_vcs
@@ -105,6 +168,7 @@ jobs:
 
       - name: Build plugin
         id: build
+        if: steps.config.outputs.build == 'grunt'
         run: |
           if npx grunt --version &> /dev/null 2>&1; then
             npx grunt build
@@ -115,6 +179,7 @@ jobs:
 
       - name: Package plugin
         id: package
+        if: steps.config.outputs.build == 'grunt'
         run: |
           VERSION=${{ steps.version.outputs.version }}
           SLUG=${{ inputs.plugin-slug }}
@@ -155,16 +220,80 @@ jobs:
             echo "zip=release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
           fi
 
-      - name: Verify build artifacts
+      # --- .distignore build ("build": "distignore") ------------------------
+
+      - name: Build assets (distignore)
+        if: steps.config.outputs.build == 'distignore'
+        working-directory: ${{ inputs.plugin-dir }}
         run: |
-          test -d "${{ steps.package.outputs.build_dir }}" || { echo "::error::Build directory not found — does package.json version match the tag?"; exit 1; }
-          test -f "${{ steps.package.outputs.zip }}" || { echo "::error::Release zip not found"; exit 1; }
-          echo "Build OK — ${{ steps.package.outputs.zip }}"
+          if [ -f package.json ] && jq -e '.scripts.build' package.json > /dev/null; then
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            npm run build
+          else
+            echo "No build script in package.json — no assets to compile"
+          fi
+
+      - name: Install Composer dependencies (distignore)
+        if: steps.config.outputs.build == 'distignore'
+        working-directory: ${{ inputs.plugin-dir }}
+        run: |
+          if [ -f composer.json ]; then
+            composer install --no-dev --optimize-autoloader --ignore-platform-reqs --no-interaction
+          fi
+
+      - name: Generate POT translation file (distignore)
+        if: steps.config.outputs.build == 'distignore'
+        working-directory: ${{ inputs.plugin-dir }}
+        run: |
+          if [ -d languages ]; then
+            curl -sSfL -o "$RUNNER_TEMP/wp-cli.phar" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+            # Text domain comes from the plugin header.
+            php "$RUNNER_TEMP/wp-cli.phar" i18n make-pot . "languages/${{ inputs.plugin-slug }}.pot" \
+              --exclude=node_modules,vendor,release,tests \
+              || echo "::warning::make-pot failed — .pot may be stale"
+          fi
+
+      - name: Package plugin (distignore)
+        id: package_dist
+        if: steps.config.outputs.build == 'distignore'
+        working-directory: ${{ inputs.plugin-dir }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SLUG=${{ inputs.plugin-slug }}
+          [ -f .distignore ] || { echo "::error::\"build\": \"distignore\" but there is no .distignore in $PLUGIN_DIR"; exit 1; }
+
+          rm -rf release
+          mkdir -p "release/${VERSION}"
+          # rsync reads .distignore as exclude patterns (# lines are comments).
+          rsync -a --exclude-from=.distignore --exclude='/.git' --exclude='/release' --exclude='/.distignore' \
+            ./ "release/${VERSION}/"
+
+          # The zip holds a <slug>/ folder, as WordPress expects.
+          mkdir -p release/zip && cp -R "release/${VERSION}" "release/zip/${SLUG}"
+          (cd release/zip && zip -rq "../${SLUG}.${VERSION}.zip" "${SLUG}")
+          rm -rf release/zip
+
+          # Outputs are relative to the workspace, like the Grunt path's.
+          PRE=""; [ "$PLUGIN_DIR" = "." ] || PRE="${PLUGIN_DIR%/}/"
+          echo "build_dir=${PRE}release/${VERSION}" >> $GITHUB_OUTPUT
+          echo "zip=${PRE}release/${SLUG}.${VERSION}.zip" >> $GITHUB_OUTPUT
+          echo "Zip contents:"; unzip -l "release/${SLUG}.${VERSION}.zip" | tail -n +4 | awk '{print $4}' | cut -d/ -f1-2 | sort -u | head -40
+
+      - name: Verify build artifacts
+        id: artifacts
+        run: |
+          BUILD_DIR="${{ steps.package.outputs.build_dir }}${{ steps.package_dist.outputs.build_dir }}"
+          ZIP="${{ steps.package.outputs.zip }}${{ steps.package_dist.outputs.zip }}"
+          test -d "$BUILD_DIR" || { echo "::error::Build directory not found — does package.json version match the tag?"; exit 1; }
+          test -f "$ZIP" || { echo "::error::Release zip not found"; exit 1; }
+          echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
+          echo "zip=$ZIP" >> $GITHUB_OUTPUT
+          echo "Build OK — $ZIP"
 
       - name: Verify versions match tag
         run: |
           VERSION=${{ steps.version.outputs.version }}
-          BUILD_DIR=${{ steps.package.outputs.build_dir }}
+          BUILD_DIR=${{ steps.artifacts.outputs.build_dir }}
           FAILED=0
 
           # Main plugin file: the root PHP file with a Plugin Name header
@@ -187,26 +316,77 @@ jobs:
             fi
           fi
 
+          # Extra locations from release.json version_checks.
+          CFG="$PLUGIN_DIR/release.json"
+          if [ -f "$CFG" ]; then
+            N=$(jq '.version_checks // [] | length' "$CFG")
+            for i in $(seq 0 $((N - 1))); do
+              F=$(jq -r ".version_checks[$i].file" "$CFG")
+              PAT=$(jq -r ".version_checks[$i].pattern" "$CFG")
+              if [ ! -f "$BUILD_DIR/$F" ]; then
+                echo "::error::version_checks: $F not found in build"; FAILED=1; continue
+              fi
+              FOUND=$(PAT="$PAT" perl -ne 'if (/$ENV{PAT}/) { print $1; exit }' "$BUILD_DIR/$F")
+              if [ "$FOUND" != "$VERSION" ]; then
+                echo "::error file=$F::'$PAT' matched '$FOUND', expected '$VERSION'"
+                FAILED=1
+              else
+                echo "$F: $FOUND"
+              fi
+            done
+          fi
+
           [ "$FAILED" = "0" ] && echo "Versions match tag $VERSION"
           exit $FAILED
 
+      - name: Upload build (dry run)
+        if: inputs.dry-run
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.plugin-slug }}-${{ steps.version.outputs.version }}
+          path: ${{ steps.artifacts.outputs.zip }}
+
+      - name: Check Sellwire access (dry run)
+        if: inputs.dry-run && steps.config.outputs.sellwire == 'true'
+        env:
+          SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
+        run: |
+          # POST without a file: Sellwire checks the key and that the file ID
+          # belongs to this account, then fails on the missing upload. That
+          # proves access without creating a version.
+          FILE_ID=${{ steps.config.outputs.sellwire_file_id }}
+          if [ -z "$SELLWIRE_API_KEY" ] || [ -z "$FILE_ID" ]; then
+            echo "::warning::SELLWIRE_API_KEY secret or sellwire_file_id missing — a real release would fail"; exit 0
+          fi
+          HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
+            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            -H "X-API-KEY: ${SELLWIRE_API_KEY}" -F "version=0.0.0-dry-run")
+          BODY=$(cat /tmp/sellwire.json)
+          echo "HTTP $HTTP: $BODY"
+          if echo "$BODY" | grep -qi 'could not be found\|invalid api key\|unauthorized'; then
+            echo "::error::Sellwire rejected the key or file ID"; exit 1
+          fi
+          echo "Sellwire accepted the key and file ID."
+
       - name: Deploy to WordPress.org
-        if: steps.config.outputs.wordpress_org == 'true'
+        if: steps.config.outputs.wordpress_org == 'true' && !inputs.dry-run
         uses: 10up/action-wordpress-plugin-deploy@stable
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
           SLUG: ${{ inputs.plugin-slug }}
           VERSION: ${{ steps.version.outputs.version }}
-          BUILD_DIR: ${{ steps.package.outputs.build_dir }}
+          BUILD_DIR: ${{ steps.artifacts.outputs.build_dir }}
 
       - name: Create GitHub Release
+        if: ${{ !inputs.dry-run }}
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.zip }}
+          files: ${{ steps.artifacts.outputs.zip }}
           generate_release_notes: true
 
       - name: Add draft tweet to release
+        if: ${{ !inputs.dry-run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -214,6 +394,8 @@ jobs:
           SLUG=${{ inputs.plugin-slug }}
           TAG=${GITHUB_REF_NAME}
           TYPE=${{ steps.config.outputs.type }}
+          CFG="$PLUGIN_DIR/release.json"
+          README="$PLUGIN_DIR/readme.txt"
 
           # Derive display name: "wpum-custom-fields" -> "Custom Fields"
           if [ "$SLUG" = "wp-user-manager" ]; then
@@ -230,8 +412,8 @@ jobs:
           fi
 
           # release.json can override the link, e.g. "addon_url": "https://wpusermanager.com/addons/stripe-pro/"
-          if [ -f release.json ]; then
-            URL_OVERRIDE=$(jq -r '.addon_url // empty' release.json)
+          if [ -f "$CFG" ]; then
+            URL_OVERRIDE=$(jq -r '.addon_url // .url // empty' "$CFG")
             if [ -n "$URL_OVERRIDE" ]; then
               ADDON_URL="$URL_OVERRIDE"
             fi
@@ -240,13 +422,13 @@ jobs:
           # Extract changelog for this version from readme.txt
           # The changelog was already assembled during release prep (from PRs + project board)
           BULLETS=""
-          if [ -f readme.txt ]; then
+          if [ -f "$README" ]; then
             # Extract lines between "= X.X.X ..." and the next "= " heading
             BULLETS=$(awk -v ver="= ${VERSION}" '
               $0 ~ ver { found=1; next }
               found && /^= / { exit }
               found && /^[-*] / { print $0 }
-            ' readme.txt | sed 's/^[-*] /• /' | head -8)
+            ' "$README" | sed 's/^[-*] /• /' | head -8)
           fi
 
           # Fallback: if readme.txt didn't have a changelog, try git log
@@ -270,6 +452,14 @@ jobs:
             HEADER="WP User Manager addon update 🚀"
           else
             HEADER="WP User Manager ${VERSION} Released 🚀"
+          fi
+
+          # Plugins that aren't WP User Manager name themselves in release.json.
+          NAME_OVERRIDE=""
+          [ -f "$CFG" ] && NAME_OVERRIDE=$(jq -r '.name // empty' "$CFG")
+          if [ -n "$NAME_OVERRIDE" ]; then
+            DISPLAY_NAME="$NAME_OVERRIDE"
+            HEADER="${NAME_OVERRIDE} ${VERSION} released 🚀"
           fi
 
           # Write tweet block to a temp file to avoid quoting issues
@@ -297,7 +487,7 @@ jobs:
           gh release edit "$TAG" --notes-file /tmp/release_body.md
 
       - name: Update EDD download
-        if: steps.config.outputs.edd == 'true'
+        if: steps.config.outputs.edd == 'true' && !inputs.dry-run
         env:
           WPUM_RELEASE_API_TOKEN: ${{ secrets.WPUM_RELEASE_API_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -317,3 +507,27 @@ jobs:
               \"zip_url\": \"${RELEASE_URL}\",
               \"github_token\": \"${GH_TOKEN}\"
             }"
+
+      - name: Upload to Sellwire
+        if: steps.config.outputs.sellwire == 'true' && !inputs.dry-run
+        env:
+          SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
+        run: |
+          SLUG=${{ inputs.plugin-slug }}
+          VERSION=${{ steps.version.outputs.version }}
+          FILE_ID=${{ steps.config.outputs.sellwire_file_id }}
+          ZIP=${{ steps.artifacts.outputs.zip }}
+          [ -n "$SELLWIRE_API_KEY" ] || { echo "::error::SELLWIRE_API_KEY secret is not set"; exit 1; }
+          [ -n "$FILE_ID" ] || { echo "::error::sellwire_file_id is not set in release.json"; exit 1; }
+
+          # Sellwire reads readme.txt (tested up to, changelog) from
+          # "<uploaded file name minus .zip>/readme.txt" inside the zip, so the
+          # upload is named <slug>.zip to match the zip's <slug>/ folder.
+          HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
+            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            -H "X-API-KEY: ${SELLWIRE_API_KEY}" \
+            -F "version=${VERSION}" \
+            -F "notify=${{ steps.config.outputs.sellwire_notify }}" \
+            -F "new_file=@${ZIP};filename=${SLUG}.zip")
+          echo "HTTP $HTTP: $(cat /tmp/sellwire.json)"
+          [ "$HTTP" = "200" ] || { echo "::error::Sellwire upload failed (HTTP $HTTP)"; exit 1; }
