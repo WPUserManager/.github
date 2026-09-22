@@ -12,6 +12,9 @@
 #         plugin-slug: wp-user-manager
 #       secrets: inherit
 #
+# Repos owned by another account (e.g. polevaultweb) can't inherit: they must
+# name each secret, e.g. `secrets: { SVN_USERNAME: ${{ secrets.SVN_USERNAME }} }`.
+#
 # release.json (in plugin-dir) drives the rest. Everything below is optional,
 # and a repo that sets none of it gets the original Grunt behaviour:
 #
@@ -53,6 +56,18 @@ on:
         required: false
         type: boolean
         default: false
+    # Declared so repos outside the WPUserManager org can pass them explicitly:
+    # `secrets: inherit` only works within the same org, and across owners it
+    # silently passes nothing. WPUM repos keep using `secrets: inherit`.
+    secrets:
+      SVN_USERNAME:
+        required: false
+      SVN_PASSWORD:
+        required: false
+      WPUM_RELEASE_API_TOKEN:
+        required: false
+      SELLWIRE_API_KEY:
+        required: false
 
 jobs:
   deploy:
@@ -346,27 +361,48 @@ jobs:
           name: ${{ inputs.plugin-slug }}-${{ steps.version.outputs.version }}
           path: ${{ steps.artifacts.outputs.zip }}
 
+      - name: Check deploy secrets (dry run)
+        if: inputs.dry-run
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          WPUM_RELEASE_API_TOKEN: ${{ secrets.WPUM_RELEASE_API_TOKEN }}
+          SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
+        run: |
+          # Reports only whether each secret the real release needs arrived.
+          NEED=""
+          [ "${{ steps.config.outputs.wordpress_org }}" = "true" ] && NEED="$NEED SVN_USERNAME SVN_PASSWORD"
+          [ "${{ steps.config.outputs.edd }}" = "true" ] && NEED="$NEED WPUM_RELEASE_API_TOKEN"
+          [ "${{ steps.config.outputs.sellwire }}" = "true" ] && NEED="$NEED SELLWIRE_API_KEY"
+          for S in $NEED; do
+            if [ -n "${!S}" ]; then echo "$S: set"; else echo "::warning::$S is empty — a real release would fail. Across owners, pass it by name rather than secrets: inherit."; fi
+          done
+          [ -n "$NEED" ] || echo "No deploy secrets needed"
+
       - name: Check Sellwire access (dry run)
         if: inputs.dry-run && steps.config.outputs.sellwire == 'true'
         env:
           SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
         run: |
-          # POST without a file: Sellwire checks the key and that the file ID
-          # belongs to this account, then fails on the missing upload. That
-          # proves access without creating a version.
+          # POST without a file: Sellwire checks the key, then that the file ID
+          # belongs to this account, and only then fails on the missing upload.
+          # So the upload error, and nothing else, proves access without
+          # creating a version. The ID goes in the path: on a POST, Sellwire's
+          # REST controller ignores the query string.
           FILE_ID=${{ steps.config.outputs.sellwire_file_id }}
           if [ -z "$SELLWIRE_API_KEY" ] || [ -z "$FILE_ID" ]; then
             echo "::warning::SELLWIRE_API_KEY secret or sellwire_file_id missing — a real release would fail"; exit 0
           fi
           HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
-            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            "https://app.sellwire.net/api/1/file_new_version/id/${FILE_ID}" \
             -H "X-API-KEY: ${SELLWIRE_API_KEY}" -F "version=0.0.0-dry-run")
           BODY=$(cat /tmp/sellwire.json)
           echo "HTTP $HTTP: $BODY"
-          if echo "$BODY" | grep -qi 'could not be found\|invalid api key\|unauthorized'; then
-            echo "::error::Sellwire rejected the key or file ID"; exit 1
+          if echo "$BODY" | grep -qi 'select a file'; then
+            echo "Sellwire accepted the key and file ID."
+          else
+            echo "::error::Sellwire didn't accept the key and file ID (expected the missing-upload error)"; exit 1
           fi
-          echo "Sellwire accepted the key and file ID."
 
       - name: Deploy to WordPress.org
         if: steps.config.outputs.wordpress_org == 'true' && !inputs.dry-run
@@ -524,7 +560,7 @@ jobs:
           # "<uploaded file name minus .zip>/readme.txt" inside the zip, so the
           # upload is named <slug>.zip to match the zip's <slug>/ folder.
           HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
-            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            "https://app.sellwire.net/api/1/file_new_version/id/${FILE_ID}" \
             -H "X-API-KEY: ${SELLWIRE_API_KEY}" \
             -F "version=${VERSION}" \
             -F "notify=${{ steps.config.outputs.sellwire_notify }}" \
