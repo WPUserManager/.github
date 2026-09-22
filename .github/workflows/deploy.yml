@@ -12,6 +12,9 @@
 #         plugin-slug: wp-user-manager
 #       secrets: inherit
 #
+# Repos owned by another account (e.g. polevaultweb) can't inherit: they must
+# name each secret, e.g. `secrets: { SVN_USERNAME: ${{ secrets.SVN_USERNAME }} }`.
+#
 # release.json (in plugin-dir) drives the rest. Everything below is optional,
 # and a repo that sets none of it gets the original Grunt behaviour:
 #
@@ -53,6 +56,18 @@ on:
         required: false
         type: boolean
         default: false
+    # Declared so repos outside the WPUserManager org can pass them explicitly:
+    # `secrets: inherit` only works within the same org, and across owners it
+    # silently passes nothing. WPUM repos keep using `secrets: inherit`.
+    secrets:
+      SVN_USERNAME:
+        required: false
+      SVN_PASSWORD:
+        required: false
+      WPUM_RELEASE_API_TOKEN:
+        required: false
+      SELLWIRE_API_KEY:
+        required: false
 
 jobs:
   deploy:
@@ -345,6 +360,24 @@ jobs:
         with:
           name: ${{ inputs.plugin-slug }}-${{ steps.version.outputs.version }}
           path: ${{ steps.artifacts.outputs.zip }}
+
+      - name: Check deploy secrets (dry run)
+        if: inputs.dry-run
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          WPUM_RELEASE_API_TOKEN: ${{ secrets.WPUM_RELEASE_API_TOKEN }}
+          SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
+        run: |
+          # Reports only whether each secret the real release needs arrived.
+          NEED=""
+          [ "${{ steps.config.outputs.wordpress_org }}" = "true" ] && NEED="$NEED SVN_USERNAME SVN_PASSWORD"
+          [ "${{ steps.config.outputs.edd }}" = "true" ] && NEED="$NEED WPUM_RELEASE_API_TOKEN"
+          [ "${{ steps.config.outputs.sellwire }}" = "true" ] && NEED="$NEED SELLWIRE_API_KEY"
+          for S in $NEED; do
+            if [ -n "${!S}" ]; then echo "$S: set"; else echo "::warning::$S is empty — a real release would fail. Across owners, pass it by name rather than secrets: inherit."; fi
+          done
+          [ -n "$NEED" ] || echo "No deploy secrets needed"
 
       - name: Check Sellwire access (dry run)
         if: inputs.dry-run && steps.config.outputs.sellwire == 'true'
