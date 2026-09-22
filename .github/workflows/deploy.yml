@@ -384,22 +384,25 @@ jobs:
         env:
           SELLWIRE_API_KEY: ${{ secrets.SELLWIRE_API_KEY }}
         run: |
-          # POST without a file: Sellwire checks the key and that the file ID
-          # belongs to this account, then fails on the missing upload. That
-          # proves access without creating a version.
+          # POST without a file: Sellwire checks the key, then that the file ID
+          # belongs to this account, and only then fails on the missing upload.
+          # So the upload error, and nothing else, proves access without
+          # creating a version. The ID goes in the path: on a POST, Sellwire's
+          # REST controller ignores the query string.
           FILE_ID=${{ steps.config.outputs.sellwire_file_id }}
           if [ -z "$SELLWIRE_API_KEY" ] || [ -z "$FILE_ID" ]; then
             echo "::warning::SELLWIRE_API_KEY secret or sellwire_file_id missing — a real release would fail"; exit 0
           fi
           HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
-            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            "https://app.sellwire.net/api/1/file_new_version/id/${FILE_ID}" \
             -H "X-API-KEY: ${SELLWIRE_API_KEY}" -F "version=0.0.0-dry-run")
           BODY=$(cat /tmp/sellwire.json)
           echo "HTTP $HTTP: $BODY"
-          if echo "$BODY" | grep -qi 'could not be found\|invalid api key\|unauthorized'; then
-            echo "::error::Sellwire rejected the key or file ID"; exit 1
+          if echo "$BODY" | grep -qi 'select a file'; then
+            echo "Sellwire accepted the key and file ID."
+          else
+            echo "::error::Sellwire didn't accept the key and file ID (expected the missing-upload error)"; exit 1
           fi
-          echo "Sellwire accepted the key and file ID."
 
       - name: Deploy to WordPress.org
         if: steps.config.outputs.wordpress_org == 'true' && !inputs.dry-run
@@ -557,7 +560,7 @@ jobs:
           # "<uploaded file name minus .zip>/readme.txt" inside the zip, so the
           # upload is named <slug>.zip to match the zip's <slug>/ folder.
           HTTP=$(curl -sS -o /tmp/sellwire.json -w '%{http_code}' -X POST \
-            "https://app.sellwire.net/api/1/file_new_version?id=${FILE_ID}&format=json" \
+            "https://app.sellwire.net/api/1/file_new_version/id/${FILE_ID}" \
             -H "X-API-KEY: ${SELLWIRE_API_KEY}" \
             -F "version=${VERSION}" \
             -F "notify=${{ steps.config.outputs.sellwire_notify }}" \
