@@ -165,7 +165,13 @@ jobs:
 
       - name: Install Composer dependencies
         if: steps.config.outputs.build == 'grunt' && hashFiles('composer.json') != ''
-        run: composer install --no-dev --optimize-autoloader --ignore-platform-reqs
+        run: |
+          # Composer autoloader suffix: on a clean checkout Composer names the
+          # autoloader class after composer.lock's content-hash. Addons with the
+          # same dependencies share that hash, so two active addons declare the
+          # same ComposerAutoloaderInit class and fatal. Pin it to the slug.
+          composer config autoloader-suffix "$(echo '${{ inputs.plugin-slug }}' | tr -c 'A-Za-z0-9\n' '_')"
+          composer install --no-dev --optimize-autoloader --ignore-platform-reqs
 
       - name: Generate POT translation file
         if: steps.config.outputs.build == 'grunt'
@@ -253,6 +259,8 @@ jobs:
         working-directory: ${{ inputs.plugin-dir }}
         run: |
           if [ -f composer.json ]; then
+            # Unique autoloader class per plugin: see the grunt Composer step.
+            composer config autoloader-suffix "$(echo '${{ inputs.plugin-slug }}' | tr -c 'A-Za-z0-9\n' '_')"
             composer install --no-dev --optimize-autoloader --ignore-platform-reqs --no-interaction
           fi
 
